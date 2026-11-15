@@ -959,6 +959,402 @@ describe('updateStaticPageSriHashes', () => {
 		expect(h.extScriptHashes.size).toBe(0)
 		expect(h.extStyleHashes.size).toBe(0)
 	})
+
+	it('removes inline script when the declared sri hash does not match its content', async () => {
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script integrity="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=">console.log("Hello World!")</script><!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const expected = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		let warnCounter = 0
+		let lastWarnMsg = ''
+		const updated = await updateStaticPageSriHashes(
+			{
+				info: () => {},
+				warn: (msg: string) => {
+					warnCounter += 1
+					lastWarnMsg = msg
+				},
+				error: () => {},
+			},
+			testsDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(expected)
+		expect(warnCounter).toBe(1)
+		expect(lastWarnMsg).toContain('integrity hash mismatch')
+
+		// "no changes"
+		expect(h.inlineScriptHashes.size).toBe(0)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extScriptHashes.size).toBe(0)
+		expect(h.extStyleHashes.size).toBe(0)
+		expect(h.perPageSriHashes.get('index.html')?.scripts.size).toBe(0)
+	})
+
+	it('preserves inline script when one of multiple declared sri hashes matches its content', async () => {
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script integrity="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= sha256-TWupyvVdPa1DyFqLnQMqRpuUWdS3nKPnz70IcS/1o3Q=">console.log("Hello World!")</script>
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		const updated = await updateStaticPageSriHashes(
+			console,
+			testsDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(content)
+		expect(h.inlineScriptHashes.size).toBe(1)
+		expect(
+			h.inlineScriptHashes.has(
+				'sha256-TWupyvVdPa1DyFqLnQMqRpuUWdS3nKPnz70IcS/1o3Q=',
+			),
+		).toBe(true)
+		expect(
+			h.perPageSriHashes
+				.get('index.html')
+				?.scripts.has('sha256-TWupyvVdPa1DyFqLnQMqRpuUWdS3nKPnz70IcS/1o3Q='),
+		).toBe(true)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extScriptHashes.size).toBe(0)
+		expect(h.extStyleHashes.size).toBe(0)
+	})
+
+	it('removes inline script with empty integrity attribute', async () => {
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script integrity="">console.log("Hello World!")</script><!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const expected = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		let warnCounter = 0
+		let lastWarnMsg = ''
+		const updated = await updateStaticPageSriHashes(
+			{
+				info: () => {},
+				warn: (msg: string) => {
+					warnCounter += 1
+					lastWarnMsg = msg
+				},
+				error: () => {},
+			},
+			testsDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(expected)
+		expect(warnCounter).toBe(1)
+		expect(lastWarnMsg).toContain('empty integrity attribute')
+
+		// "no changes"
+		expect(h.inlineScriptHashes.size).toBe(0)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extScriptHashes.size).toBe(0)
+		expect(h.extStyleHashes.size).toBe(0)
+	})
+
+	it('removes inline script with malformed integrity attribute', async () => {
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script integrity="sha256-not-a-valid-hash">console.log("Hello World!")</script><!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const expected = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		let warnCounter = 0
+		let lastWarnMsg = ''
+		const updated = await updateStaticPageSriHashes(
+			{
+				info: () => {},
+				warn: (msg: string) => {
+					warnCounter += 1
+					lastWarnMsg = msg
+				},
+				error: () => {},
+			},
+			testsDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(expected)
+		expect(warnCounter).toBe(1)
+		expect(lastWarnMsg).toContain('invalid integrity attribute')
+
+		// "no changes"
+		expect(h.inlineScriptHashes.size).toBe(0)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extScriptHashes.size).toBe(0)
+		expect(h.extStyleHashes.size).toBe(0)
+	})
+
+	it('preserves external script (same origin) when the declared sri hash matches the resource', async () => {
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script type="module" src="/state.mjs" integrity="sha256-c2maJMv9xUmyw/qVU3BqJdJxvlXslBMh6bElfvFXXTQ="></script>
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		const updated = await updateStaticPageSriHashes(
+			console,
+			distDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(content)
+		expect(h.extScriptHashes.size).toBe(1)
+		expect(
+			h.extScriptHashes.has(
+				'sha256-c2maJMv9xUmyw/qVU3BqJdJxvlXslBMh6bElfvFXXTQ=',
+			),
+		).toBe(true)
+		expect(h.perResourceSriHashes.scripts.get('/state.mjs')).toEqual(
+			'sha256-c2maJMv9xUmyw/qVU3BqJdJxvlXslBMh6bElfvFXXTQ=',
+		)
+		expect(
+			h.perPageSriHashes
+				.get('index.html')
+				?.scripts.has('sha256-c2maJMv9xUmyw/qVU3BqJdJxvlXslBMh6bElfvFXXTQ='),
+		).toBe(true)
+		expect(h.inlineScriptHashes.size).toBe(0)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extStyleHashes.size).toBe(0)
+	})
+
+	it('removes external script (same origin) when the declared sri hash does not match the resource', async () => {
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script type="module" src="/state.mjs" integrity="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="></script><!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const expected = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		let warnCounter = 0
+		let lastWarnMsg = ''
+		const updated = await updateStaticPageSriHashes(
+			{
+				info: () => {},
+				warn: (msg: string) => {
+					warnCounter += 1
+					lastWarnMsg = msg
+				},
+				error: () => {},
+			},
+			distDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(expected)
+		expect(warnCounter).toBe(1)
+		expect(lastWarnMsg).toContain('integrity hash mismatch')
+
+		// The element is removed, so its hash must not be allow-listed
+		expect(h.extScriptHashes.size).toBe(0)
+		expect(h.inlineScriptHashes.size).toBe(0)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extStyleHashes.size).toBe(0)
+		expect(h.perPageSriHashes.get('index.html')?.scripts.size).toBe(0)
+	})
+
+	it('preserves external script (cross origin) when the declared sri hash matches the fetched resource', async () => {
+		const remoteScript =
+			'https://raw.githubusercontent.com/KindSpells/astro-shield/ae9521048f2129f633c075b7f7ef24e11bbd1884/main.mjs'
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script type="module" src="${remoteScript}" integrity="sha256-i4WR4ifasidZIuS67Rr6Knsy7/hK1xbVTc8ZAmnAv1Q=" crossorigin="anonymous"></script>
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		const updated = await updateStaticPageSriHashes(
+			console,
+			rootDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(content)
+		expect(h.extScriptHashes.size).toBe(1)
+		expect(
+			h.extScriptHashes.has(
+				'sha256-i4WR4ifasidZIuS67Rr6Knsy7/hK1xbVTc8ZAmnAv1Q=',
+			),
+		).toBe(true)
+		expect(h.perResourceSriHashes.scripts.get(remoteScript)).toEqual(
+			'sha256-i4WR4ifasidZIuS67Rr6Knsy7/hK1xbVTc8ZAmnAv1Q=',
+		)
+		expect(h.inlineScriptHashes.size).toBe(0)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extStyleHashes.size).toBe(0)
+	})
+
+	it('removes external script (cross origin) when the declared sri hash does not match the fetched resource', async () => {
+		const remoteScript =
+			'https://raw.githubusercontent.com/KindSpells/astro-shield/ae9521048f2129f633c075b7f7ef24e11bbd1884/main.mjs'
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script type="module" src="${remoteScript}" integrity="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" crossorigin="anonymous"></script><!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const expected = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		let warnCounter = 0
+		let lastWarnMsg = ''
+		const updated = await updateStaticPageSriHashes(
+			{
+				info: () => {},
+				warn: (msg: string) => {
+					warnCounter += 1
+					lastWarnMsg = msg
+				},
+				error: () => {},
+			},
+			rootDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(expected)
+		expect(warnCounter).toBe(1)
+		expect(lastWarnMsg).toContain('integrity hash mismatch')
+
+		// The element is removed, so its hash must not be allow-listed
+		expect(h.extScriptHashes.size).toBe(0)
+		expect(h.inlineScriptHashes.size).toBe(0)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extStyleHashes.size).toBe(0)
+	})
+
+	it('preserves external style (same origin) when one of multiple declared sri hashes matches the resource', async () => {
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+				<link rel="stylesheet" href="/fixtures/fake.css" integrity="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= sha256-a8DhsANlpipCfrn1UYtdKQaaeWgSyW4hBvqdxDOfoow=">
+			</head>
+			<body>
+				<h1>My Test Page</h1>
+				<p>Some text</p>
+			</body>
+		</html>`
+
+		const h = getEmptyHashes()
+		const updated = await updateStaticPageSriHashes(
+			console,
+			testsDir,
+			'index.html',
+			content,
+			h,
+		)
+
+		expect(updated).toEqual(content)
+		expect(h.extStyleHashes.size).toBe(1)
+		expect(
+			h.extStyleHashes.has(
+				'sha256-a8DhsANlpipCfrn1UYtdKQaaeWgSyW4hBvqdxDOfoow=',
+			),
+		).toBe(true)
+		expect(h.perResourceSriHashes.styles.get('/fixtures/fake.css')).toEqual(
+			'sha256-a8DhsANlpipCfrn1UYtdKQaaeWgSyW4hBvqdxDOfoow=',
+		)
+		expect(
+			h.perPageSriHashes
+				.get('index.html')
+				?.styles.has('sha256-a8DhsANlpipCfrn1UYtdKQaaeWgSyW4hBvqdxDOfoow='),
+		).toBe(true)
+		expect(h.inlineScriptHashes.size).toBe(0)
+		expect(h.inlineStyleHashes.size).toBe(0)
+		expect(h.extScriptHashes.size).toBe(0)
+	})
 })
 
 describe('updateDynamicPageSriHashes', () => {
@@ -1682,6 +2078,195 @@ describe('updateDynamicPageSriHashes', () => {
 		expect(h.scripts.size).toBe(0)
 		expect(h.styles.size).toBe(0)
 		expect(pageHashes.scripts.size).toBe(0)
+		expect(pageHashes.styles.size).toBe(0)
+	})
+
+	it('removes inline script when the declared sri hash does not match its content', () => {
+		const h = getMiddlewareHashes()
+
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script integrity="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=">console.log("Hello World!")</script><!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const expected = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<!-- This script will be removed -->
+			</body>
+		</html>`
+
+		let warnCounter = 0
+		let lastWarnMsg = ''
+		const { pageHashes, updatedContent } = updateDynamicPageSriHashes(
+			{
+				info: () => {},
+				warn: (msg: string) => {
+					warnCounter += 1
+					lastWarnMsg = msg
+				},
+				error: () => {},
+			},
+			content,
+			h,
+		)
+
+		expect(updatedContent).toEqual(expected)
+		expect(warnCounter).toBe(1)
+		expect(lastWarnMsg).toContain('integrity hash mismatch')
+		expect(pageHashes.scripts.size).toBe(0)
+		expect(pageHashes.styles.size).toBe(0)
+	})
+
+	it('preserves inline script when one of multiple declared sri hashes matches its content', () => {
+		const h = getMiddlewareHashes()
+
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script integrity="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= sha256-TWupyvVdPa1DyFqLnQMqRpuUWdS3nKPnz70IcS/1o3Q=">console.log("Hello World!")</script>
+			</body>
+		</html>`
+
+		const { pageHashes, updatedContent } = updateDynamicPageSriHashes(
+			console,
+			content,
+			h,
+		)
+
+		expect(updatedContent).toEqual(content)
+		expect(pageHashes.scripts.size).toBe(1)
+		expect(
+			pageHashes.scripts.has(
+				'sha256-TWupyvVdPa1DyFqLnQMqRpuUWdS3nKPnz70IcS/1o3Q=',
+			),
+		).toBe(true)
+		expect(pageHashes.styles.size).toBe(0)
+	})
+
+	it('removes inline script with empty integrity attribute', () => {
+		const h = getMiddlewareHashes()
+
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script integrity="">console.log("Hello World!")</script><!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const expected = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<!-- This script will be removed -->
+			</body>
+		</html>`
+
+		let warnCounter = 0
+		let lastWarnMsg = ''
+		const { pageHashes, updatedContent } = updateDynamicPageSriHashes(
+			{
+				info: () => {},
+				warn: (msg: string) => {
+					warnCounter += 1
+					lastWarnMsg = msg
+				},
+				error: () => {},
+			},
+			content,
+			h,
+		)
+
+		expect(updatedContent).toEqual(expected)
+		expect(warnCounter).toBe(1)
+		expect(lastWarnMsg).toContain('empty integrity attribute')
+		expect(pageHashes.scripts.size).toBe(0)
+		expect(pageHashes.styles.size).toBe(0)
+	})
+
+	it('removes inline script with malformed integrity attribute', () => {
+		const h = getMiddlewareHashes()
+
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script integrity="sha256-not-a-valid-hash">console.log("Hello World!")</script><!-- This script will be removed -->
+			</body>
+		</html>`
+
+		const expected = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<!-- This script will be removed -->
+			</body>
+		</html>`
+
+		let warnCounter = 0
+		let lastWarnMsg = ''
+		const { pageHashes, updatedContent } = updateDynamicPageSriHashes(
+			{
+				info: () => {},
+				warn: (msg: string) => {
+					warnCounter += 1
+					lastWarnMsg = msg
+				},
+				error: () => {},
+			},
+			content,
+			h,
+		)
+
+		expect(updatedContent).toEqual(expected)
+		expect(warnCounter).toBe(1)
+		expect(lastWarnMsg).toContain('invalid integrity attribute')
+		expect(pageHashes.scripts.size).toBe(0)
+		expect(pageHashes.styles.size).toBe(0)
+	})
+
+	it('preserves external script when one of multiple declared sri hashes matches the allow-listed hash', () => {
+		const h = getMiddlewareHashes()
+		h.scripts.set(
+			'/core.mjs',
+			'sha256-6vcZ3jYR5LROXY5VlgX+tgNuIUVynHfMRQFXUnXSf64=',
+		)
+
+		const content = `<html>
+			<head>
+				<title>My Test Page</title>
+			</head>
+			<body>
+				<script type="module" src="/core.mjs" integrity="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= sha256-6vcZ3jYR5LROXY5VlgX+tgNuIUVynHfMRQFXUnXSf64="></script>
+			</body>
+		</html>`
+
+		const { pageHashes, updatedContent } = updateDynamicPageSriHashes(
+			console,
+			content,
+			h,
+		)
+
+		expect(updatedContent).toEqual(content)
+		expect(pageHashes.scripts.size).toBe(1)
+		expect(
+			pageHashes.scripts.has(
+				'sha256-6vcZ3jYR5LROXY5VlgX+tgNuIUVynHfMRQFXUnXSf64=',
+			),
+		).toBe(true)
 		expect(pageHashes.styles.size).toBe(0)
 	})
 })

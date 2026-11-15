@@ -77,24 +77,44 @@ const linkStyleReplacer: ElemReplacer = (hash, attrs, setCrossorigin) =>
 const urlLikeRegex = /^(https?:)?\/\/[^/]/i
 const anonymousCrossOriginRegex =
 	/crossorigin\s*=\s*("anonymous"|'anonymous'|anonymous)/i
-const integrityRegex =
-	/^integrity\s*=\s*("(?<integrity1>sha256-[a-z0-9+\/]{43}=)"|'(?<integrity2>sha256-[a-z0-9+\/]{43}=)')$/i
 const relStylesheetRegex =
 	/(^|\s+)rel\s*=\s*('stylesheet'|"stylesheet"|stylesheet(\s+?|$))/i
-const naiveAttrSplitter = /(?<!=)\s+(?!=)/
 
-const extractIntegrityHash = (attrs: string): string | undefined => {
-	for (const attr of attrs.split(naiveAttrSplitter)) {
-		// If longer than 128, it's either not an integrity attribute, or an attempt
-		// to perform a DoS attack.
-		if (attr.length <= 128) {
-			const m = integrityRegex.exec(attr)
-			if (m) {
-				return m.groups?.integrity1 ?? m.groups?.integrity2
-			}
-		}
+const integrityAttrRegex =
+	/integrity\s*=\s*("(?<integrity1>[^"]*)"|'(?<integrity2>[^']*)')/i
+const sriHashTokenRegex = /^sha256-[a-z0-9+/]{43}=$/i
+const whitespaceRegex = /\s+/
+
+type IntegrityAttr =
+	| { status: 'absent' }
+	| { status: 'empty' }
+	| { status: 'invalid' }
+	| { status: 'valid'; hashes: string[] }
+
+/**
+ * Extracts the SRI hashes declared by an `integrity` attribute, if present.
+ *
+ * The attribute value can contain multiple space-separated hashes (e.g. when a
+ * resource is referenced with more than one valid hash). Tokens that do not
+ * look like valid `sha256` hashes are ignored, but if none of the tokens is
+ * valid then the attribute is considered malformed.
+ */
+const extractIntegrityHashes = (attrs: string): IntegrityAttr => {
+	const m = integrityAttrRegex.exec(attrs)
+	if (!m) {
+		return { status: 'absent' }
 	}
-	return undefined
+
+	const value = (m.groups?.integrity1 ?? m.groups?.integrity2 ?? '').trim()
+	if (value === '') {
+		return { status: 'empty' }
+	}
+
+	const hashes = value
+		.split(whitespaceRegex)
+		.filter(token => sriHashTokenRegex.test(token))
+
+	return hashes.length > 0 ? { status: 'valid', hashes } : { status: 'invalid' }
 }
 
 export const regexProcessors = [
@@ -137,8 +157,11 @@ export const regexProcessors = [
  * This function extracts SRI hashes from inline and external resources, and
  * adds the integrity attribute to the related HTML elements.
  *
- * Notice that it assumes that the HTML content is relatively well-formed, and
- * that in case it already contains integrity attributes then they are correct.
+ * Notice that it assumes that the HTML content is relatively well-formed. When
+ * an element already declares an `integrity` attribute, its hashes are
+ * verified against the actual content of the resource (inline content, local
+ * files or remote resources). Elements whose integrity hashes cannot be
+ * verified are removed (fail-closed behaviour).
  */
 export const updateStaticPageSriHashes = async (
 	logger: Logger,
@@ -203,21 +226,74 @@ export const updateStaticPageSriHashes = async (
 					continue
 				}
 
-				const givenSriHash = extractIntegrityHash(attrs)
+				const givenIntegrity = extractIntegrityHashes(attrs)
 
-				if (givenSriHash !== undefined) {
-					if (givenSriHash) {
-						;(srcMatch ? h[`ext${t}Hashes`] : h[`inline${t}Hashes`]).add(
-							givenSriHash,
+				if (givenIntegrity.status !== 'absent') {
+					if (givenIntegrity.status !== 'valid') {
+						logger.warn(
+							`Found ${givenIntegrity.status} integrity attribute in "${relativeFilepath}". Removing ${t.toLowerCase()} element.`,
 						)
-						pageHashes[t2].add(givenSriHash)
-						if (src) {
-							h.perResourceSriHashes[t2].set(src, givenSriHash)
+						updatedContent = updatedContent.replace(match[0], '')
+						continue
+					}
+
+					// We must verify the declared hash(es) against the actual content
+					// of the resource instead of blindly trusting them.
+					let actualHash: string | undefined = undefined
+					let verificationError: string | undefined = undefined
+
+					if (src) {
+						const cachedHash = h.perResourceSriHashes[t2].get(src)
+						if (cachedHash) {
+							actualHash = cachedHash
+						} else if (urlLikeRegex.test(src)) {
+							try {
+								const resourceResponse = await fetch(
+									src.startsWith('//') ? `https:${src}` : src,
+									{ method: 'GET' },
+								)
+								actualHash = generateSRIHash(
+									await resourceResponse.arrayBuffer(),
+								)
+							} catch (err) {
+								verificationError = `unable to fetch remote resource "${src}": ${err}`
+							}
+						} else if (src.startsWith('/')) {
+							const base = state?.config.base ?? ''
+							const updatedSrc = src.startsWith(base)
+								? src.replace(base, '')
+								: src
+							const resourcePath = resolve(distDir, `.${updatedSrc}`)
+							try {
+								actualHash = generateSRIHash(await readFile(resourcePath))
+							} catch (err) {
+								verificationError = `unable to read local resource "${src}": ${err}`
+							}
+						} else {
+							verificationError = `unable to process external resource: "${src}"`
+						}
+
+						if (actualHash) {
+							h.perResourceSriHashes[t2].set(src, actualHash)
 						}
 					} else {
-						logger.warn(
-							`Found empty integrity attribute in "${relativeFilepath}".`,
+						actualHash = generateSRIHash(elemContent)
+					}
+
+					if (actualHash && givenIntegrity.hashes.includes(actualHash)) {
+						;(srcMatch ? h[`ext${t}Hashes`] : h[`inline${t}Hashes`]).add(
+							actualHash,
 						)
+						pageHashes[t2].add(actualHash)
+					} else {
+						logger.warn(
+							verificationError
+								? `Unable to verify integrity hash for resource "${src}" in "${relativeFilepath}" (${verificationError}). Removing it.`
+								: `Detected integrity hash mismatch for ${
+										src ? `resource "${src}"` : `inline ${t.toLowerCase()}`
+									} in "${relativeFilepath}". Removing it.`,
+						)
+						updatedContent = updatedContent.replace(match[0], '')
 					}
 					continue
 				}
@@ -351,48 +427,57 @@ export const updateDynamicPageSriHashes = (
 					continue
 				}
 
-				const givenSriHash = extractIntegrityHash(attrs)
+				const givenIntegrity = extractIntegrityHashes(attrs)
 
-				if (givenSriHash !== undefined) {
-					if (givenSriHash) {
-						if (src) {
-							const globalHash = globalHashes[t2].get(src)
-							if (globalHash) {
-								if (globalHash !== givenSriHash) {
-									logger.warn(
-										`Detected integrity hash mismatch for resource "${src}". Removing it.`,
-									)
-									updatedContent = updatedContent.replace(match[0], '')
-								} else {
-									sriHash = givenSriHash
-									pageHashes[t2].add(sriHash)
-								}
-							} else {
-								logger.warn(
-									`Detected reference to not explicitly allowed external resource "${src}". Removing it.`,
-								)
-								updatedContent = updatedContent.replace(match[0], '')
-							}
-						} else if (elemContent) {
-							if (
-								(t2 === 'scripts' &&
-									(sri?.allowInlineScripts ?? 'all') === 'all') ||
-								(t2 === 'styles' && (sri?.allowInlineStyles ?? 'all') === 'all')
-							) {
-								sriHash = givenSriHash
+				if (givenIntegrity.status !== 'absent') {
+					if (givenIntegrity.status !== 'valid') {
+						logger.warn(
+							`Found ${givenIntegrity.status} integrity attribute. Removing ${t.toLowerCase()} element.`,
+						)
+						updatedContent = updatedContent.replace(match[0], '')
+						continue
+					}
+
+					if (src) {
+						const globalHash = globalHashes[t2].get(src)
+						if (globalHash) {
+							if (givenIntegrity.hashes.includes(globalHash)) {
+								sriHash = globalHash
 								pageHashes[t2].add(sriHash)
 							} else {
 								logger.warn(
-									`Removing inline ${t.toLowerCase()} block (inline ${t2} are disabled).`,
+									`Detected integrity hash mismatch for resource "${src}". Removing it.`,
 								)
 								updatedContent = updatedContent.replace(match[0], '')
 							}
+						} else {
+							logger.warn(
+								`Detected reference to not explicitly allowed external resource "${src}". Removing it.`,
+							)
+							updatedContent = updatedContent.replace(match[0], '')
 						}
-					} else {
-						logger.warn(
-							`Found empty integrity attribute, removing inline ${t.toLowerCase()} block.`,
-						)
-						updatedContent = updatedContent.replace(match[0], '')
+					} else if (elemContent) {
+						// We must verify the declared hash(es) against the actual
+						// content of the element instead of blindly trusting them.
+						const actualHash = generateSRIHash(elemContent)
+						if (!givenIntegrity.hashes.includes(actualHash)) {
+							logger.warn(
+								`Detected integrity hash mismatch for inline ${t.toLowerCase()} element. Removing it.`,
+							)
+							updatedContent = updatedContent.replace(match[0], '')
+						} else if (
+							(t2 === 'scripts' &&
+								(sri?.allowInlineScripts ?? 'all') === 'all') ||
+							(t2 === 'styles' && (sri?.allowInlineStyles ?? 'all') === 'all')
+						) {
+							sriHash = actualHash
+							pageHashes[t2].add(sriHash)
+						} else {
+							logger.warn(
+								`Removing inline ${t.toLowerCase()} block (inline ${t2} are disabled).`,
+							)
+							updatedContent = updatedContent.replace(match[0], '')
+						}
 					}
 					continue
 				}
